@@ -1,0 +1,97 @@
+name: Manual Docker Build and Push
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_name:
+        description: 'Docker image name (e.g., username/openclaw or ghcr.io/username/openclaw)'
+        required: true
+        default: '${{ github.repository }}'
+      tag:
+        description: 'Image tag (e.g., latest, v1.0.0)'
+        required: false
+        default: 'manual-${{ github.run_number }}'
+      push:
+        description: 'Push to registry (true/false)'
+        required: false
+        default: 'true'
+      platforms:
+        description: 'Platforms to build (comma-separated)'
+        required: false
+        default: 'linux/amd64,linux/arm64'
+      build_args:
+        description: 'Build arguments (key=value, one per line)'
+        required: false
+        default: ''
+
+env:
+  REGISTRY: ${{ github.event.inputs.image_name != '' && contains(github.event.inputs.image_name, '/') && github.event.inputs.image_name != github.repository && '' || 'docker.io' }}
+  # 如果用户输入了完整镜像名（包含仓库），则直接使用；否则组合 REGISTRY/IMAGE_NAME
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: ${{ github.event.inputs.platforms }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub / GHCR
+        if: github.event.inputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Determine full image tag
+        id: image
+        run: |
+          INPUT_NAME="${{ github.event.inputs.image_name }}"
+          INPUT_TAG="${{ github.event.inputs.tag }}"
+          # 如果输入包含标签（如 myimg:tag），则拆分
+          if [[ "$INPUT_NAME" == *:* ]]; then
+            IMAGE_NAME="${INPUT_NAME%:*}"
+            TAG="${INPUT_NAME#*:}"
+          else
+            IMAGE_NAME="$INPUT_NAME"
+            TAG="$INPUT_TAG"
+          fi
+          # 默认 tag 为 manual-<run_number>
+          if [[ -z "$TAG" ]]; then
+            TAG="manual-${{ github.run_number }}"
+          fi
+          echo "full=$IMAGE_NAME:$TAG" >> $GITHUB_OUTPUT
+          echo "name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ github.event.inputs.platforms }}
+          push: ${{ github.event.inputs.push == 'true' }}
+          tags: ${{ steps.image.outputs.full }}
+          build-args: |
+            ${{ github.event.inputs.build_args }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          echo "## Docker Image Built" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ steps.image.outputs.full }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Platforms:** ${{ github.event.inputs.platforms }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Push:** ${{ github.event.inputs.push }}" >> $GITHUB_STEP_SUMMARY
